@@ -1,0 +1,16 @@
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local build and archive artifacts
+*.img
+*.iso
+*.qcow2
+
+# Private local notes and backups
+*.swp
+*.swo
+*~
+*.bak
