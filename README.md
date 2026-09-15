@@ -2,6 +2,12 @@
 
 Documentation of a personal project to harden the boot process on an Arch Linux laptop, combining full-disk encryption, TPM 2.0-backed automatic unlocking, and Secure Boot signed with user-owned keys.
 
+> **Warning:** This guide changes disk-encryption, initramfs, TPM, and Secure Boot
+> configuration. A mistake can make the system unbootable or cause data loss.
+> Test it on a disposable installation first, keep an Arch Live USB available,
+> and verify that a working recovery key and passphrase are stored offline before
+> making changes.
+
 ## Goal
 
 Replace a basic disk encryption setup (LUKS2 + manual passphrase) with a full chain of trust where:
@@ -30,22 +36,48 @@ TPM2 measures boot state (PCR 7)
                                       -> falls back to manual passphrase (Argon2id)
 ```
 
-## Hardware and software used
+## Tested environment
 
-- Laptop with UEFI + TPM 2.0 (firmware TPM / Intel PTT)
-- Arch Linux
+- Device: Samsung Galaxy Book 2
+- Distribution: Arch Linux
+- Firmware: UEFI
+- TPM: TPM 2.0 via Intel PTT (firmware TPM)
 - Bootloader: `systemd-boot`
+- Initramfs: `mkinitcpio`
 - Encryption: LUKS2 (native format since installation)
+- TPM enrollment: `systemd-cryptenroll`
+- Secure Boot keys and signatures: `sbctl`
 
-> **Portability note**: this guide applies to virtually any machine with UEFI + TPM 2.0 + Arch (or another systemd-based distro) using `systemd-boot`. If your machine uses **GRUB** instead, the Secure Boot steps differ substantially (it requires a signed shim and a different signing workflow).
+The complete procedure was tested on this environment. Package versions and
+firmware behavior can change, so verify the installed documentation and command
+output before applying it to another machine.
+
+> **Portability note**: the concepts apply to compatible UEFI systems with TPM
+> 2.0, LUKS2, and systemd. This guide was tested on one machine, not across all
+> hardware. Firmware, bootloader, kernel layout, and Secure Boot workflows may
+> differ. If your machine uses **GRUB**, the Secure Boot steps differ
+> substantially.
 
 ---
 
 ## Prerequisites
 
 ```bash
-sudo pacman -S sbctl tpm2-tools
+sudo pacman -S cryptsetup sbctl tpm2-tools mokutil
 ```
+
+Before changing anything:
+
+1. Confirm that the root volume is backed up.
+2. Record the current boot entries and keep an Arch Live USB available.
+3. Create and store a LUKS recovery key offline:
+
+```bash
+sudo systemd-cryptenroll --recovery-key /dev/LUKS_DEVICE
+```
+
+Never commit the displayed recovery key, a passphrase, TPM enrollment data, or
+full command output to this repository.
 
 Verify the system detects the TPM:
 
@@ -161,6 +193,13 @@ sudo cryptsetup luksDump /dev/LUKS_DEVICE | grep -A5 "Tokens:"
 
 You should see `systemd-tpm2` with `tpm2-hash-pcrs: 7`.
 
+PCR 7 should not be described as a measurement of every byte of the loaded
+kernel. Secure Boot validates signatures against enrolled keys, while PCR 7
+binds the TPM policy to the relevant Secure Boot state. A compromised
+authorized signing key can still undermine that trust model. A future UKI-based
+setup can add measurements such as PCR 11 to bind the policy more closely to
+the exact image being booted.
+
 ### 8. Automate re-signing after kernel updates
 
 Create `/etc/pacman.d/hooks/95-sbctl-sign.hook`:
@@ -181,6 +220,44 @@ Exec = /usr/bin/sbctl sign-all
 ```
 
 Without this hook, every kernel update will lose its signature and Secure Boot will refuse to boot it.
+
+---
+
+## Recovery procedure
+
+The TPM slot is an automatic-unlock convenience, not the only recovery path.
+The LUKS passphrase and recovery key must remain available independently of the
+installed operating system.
+
+If the machine does not boot after a change:
+
+1. Boot an Arch Live USB in UEFI mode.
+2. Identify the encrypted volume without publishing its identifier:
+
+   ```bash
+   lsblk -f
+   sudo cryptsetup luksDump /dev/LUKS_DEVICE
+   ```
+
+3. Unlock it with the passphrase or recovery key and mount the installed
+   system and its EFI partition under `/mnt`.
+4. Enter the installed system with `arch-chroot /mnt`.
+5. Review `/etc/mkinitcpio.conf`, the boot entries under
+   `/boot/loader/entries/`, and Secure Boot state before rebuilding anything.
+6. Regenerate the initramfs and inspect the result before rebooting:
+
+   ```bash
+   mkinitcpio -P
+   sbctl verify
+   bootctl status
+   ```
+
+The exact mount commands depend on the filesystem, subvolume layout, and EFI
+partition used by the installation; do not copy device names blindly.
+
+The fallback passphrase path was retained during the tested setup. A production
+deployment should additionally perform a controlled test of that path before
+removing or changing any existing keyslot.
 
 ---
 
@@ -220,6 +297,15 @@ This section documents three real failures during implementation, along with dia
 
 > **Methodology**: there is no standardized public benchmark that scores "disk encryption security" as a percentage. The scores below are a qualitative self-assessment based on documented technical criteria (KDF type, hardware isolation of the key, boot integrity verification, code transparency), intended as a comparative and study guide — not a certified metric.
 
+## Threat model and scope
+
+This project is designed primarily for a stolen or powered-off laptop where an
+attacker attempts offline access to the disk or replaces boot components. It
+does not protect data while the system is unlocked, against malware running in
+the active operating system, against a compromised UEFI firmware, or against a
+compromised Secure Boot signing key. No physical disk-extraction or "evil maid"
+penetration test was performed.
+
 | Criterion | LUKS2 (basic config) | LUKS2 + TPM2 + custom Secure Boot | Apple FileVault (Secure Enclave) |
 |---|---|---|---|
 | Offline brute-force resistance | Medium (depends on KDF) | High (tuned KDF + hardware) | High (hardware rate-limiting) |
@@ -255,6 +341,14 @@ This project puts into practice concepts covered in the CompTIA Security+ and Cy
 ## Disclaimer
 
 This documentation describes a personal configuration for educational and learning purposes. Applying it carries the risk of losing access to the system if a mistake is made during the process; it is strongly recommended to always keep an external boot medium (live USB) and a recovery key (`systemd-cryptenroll --recovery-key`) stored safely offline before making any of these changes.
+
+## References
+
+- [ArchWiki: dm-crypt](https://wiki.archlinux.org/title/Dm-crypt)
+- [ArchWiki: Secure Boot](https://wiki.archlinux.org/title/Unified_Extensible_Firmware_Interface/Secure_Boot)
+- [`systemd-cryptenroll` documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd-cryptenroll.html)
+- [`cryptsetup` documentation](https://gitlab.com/cryptsetup/cryptsetup)
+- [`sbctl` project](https://github.com/Foxboron/sbctl)
 
 ## License
 
